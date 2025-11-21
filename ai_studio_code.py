@@ -10,49 +10,23 @@ from datetime import datetime, timedelta
 # --- CONFIGURATION ---
 st.set_page_config(page_title="NeuroLearn AI", page_icon="🧠", layout="wide")
 
-# --- SESSION STATE INITIALIZATION ---
-if "valid_model" not in st.session_state:
-    st.session_state.valid_model = None
-
-# --- SIDEBAR & IMMEDIATE DIAGNOSTICS ---
+# --- SIDEBAR ---
 with st.sidebar:
     st.header("🔑 Setup")
     api_key_input = st.text_input("Google Gemini API Key", type="password")
-    
-    # Clean the key
     api_key = api_key_input.strip() if api_key_input else None
     
     st.divider()
-    st.write("### 🛠️ Connection Status")
     
-    # IMMEDIATE CHECK LOGIC
     if api_key:
+        # Simple connectivity check
         try:
             genai.configure(api_key=api_key)
-            # Try to list models to verify connection
-            all_models = list(genai.list_models())
-            
-            # Find the best model
-            found_model = None
-            for m in all_models:
-                if 'generateContent' in m.supported_generation_methods:
-                    if 'flash' in m.name and '1.5' in m.name:
-                        found_model = m.name
-                        break
-            
-            if not found_model:
-                # Fallback
-                found_model = "gemini-pro"
-
-            st.session_state.valid_model = found_model
-            st.success(f"✅ **Connected!**\n\nUsing: `{found_model}`")
-            
+            # We strictly use 1.5 Flash
+            model = genai.GenerativeModel('gemini-1.5-flash') 
+            st.success("✅ **Connected to Gemini 1.5 Flash**")
         except Exception as e:
-            st.session_state.valid_model = None
-            st.error(f"❌ **Connection Failed**\n\nError: {str(e)}")
-            st.info("Check if your API Key is correct or create a new one.")
-    else:
-        st.warning("Waiting for Key...")
+            st.error("❌ Key Invalid")
 
 # --- FUNCTIONS ---
 
@@ -85,9 +59,12 @@ def get_youtube_transcript(url):
     except Exception as e:
         return None, "Video must have captions enabled."
 
-def analyze_content(content_text, model_name):
-    # Use the model we found in the sidebar check
-    model = genai.GenerativeModel(model_name)
+def analyze_content(content_text, api_key):
+    genai.configure(api_key=api_key)
+    
+    # HARDCODED FIX: Use the specific stable model name
+    # This prevents the "404 models/..." error
+    model = genai.GenerativeModel('gemini-1.5-flash')
     
     prompt = f"""
     Analyze this content for a student. Return strictly VALID JSON:
@@ -100,14 +77,14 @@ def analyze_content(content_text, model_name):
     }}
     
     CONTENT:
-    {content_text[:25000]}
+    {content_text[:30000]}
     """
     
     try:
         response = model.generate_content(prompt)
         return json.loads(clean_json_text(response.text))
     except Exception as e:
-        st.error(f"Analysis Error: {e}")
+        st.error(f"AI Error: {e}")
         return None
 
 def generate_schedule(start_date, difficulty):
@@ -124,12 +101,11 @@ def generate_schedule(start_date, difficulty):
         })
     return pd.DataFrame(schedule)
 
-# --- MAIN UI ---
+# --- UI ---
 st.title("🧠 NeuroSchedule AI")
 
-# Stop user if key is invalid
-if not st.session_state.valid_model:
-    st.info("👈 Please enter a valid API Key in the sidebar to start.")
+if not api_key:
+    st.warning("⚠️ Enter API Key in sidebar.")
     st.stop()
 
 tab1, tab2, tab3 = st.tabs(["📄 PDF Upload", "📺 YouTube Video", "📝 Paste Text"])
@@ -149,19 +125,14 @@ with tab3:
     if t: content = t
 
 if content and st.button("🚀 Analyze"):
-    with st.spinner("Running Neuro-Analysis..."):
-        # Pass the valid model from session state
-        data = analyze_content(content, st.session_state.valid_model)
-        
+    with st.spinner("Processing with Gemini 1.5 Flash..."):
+        data = analyze_content(content, api_key)
         if data:
             st.divider()
             c1, c2 = st.columns(2)
             c1.metric("Difficulty", f"{data['difficulty_score']}/10")
-            c2.metric("Study Time", f"{data['estimated_study_time_minutes']} min")
-            
-            st.info(f"**Summary:** {data['summary']}")
-            st.write("**Key Concepts:** " + ", ".join(data['key_concepts']))
-            st.success(f"💡 **Strategy:** {data['learning_advice']}")
-            
-            st.subheader("📅 Your Schedule")
+            c2.metric("Time", f"{data['estimated_study_time_minutes']} min")
+            st.info(data['summary'])
+            st.write("**Concepts:** " + ", ".join(data['key_concepts']))
+            st.success(f"💡 **Tip:** {data['learning_advice']}")
             st.dataframe(generate_schedule(datetime.now(), data['difficulty_score']), use_container_width=True, hide_index=True)
