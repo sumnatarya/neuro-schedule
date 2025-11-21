@@ -6,29 +6,55 @@ import PyPDF2
 import pandas as pd
 import json
 from datetime import datetime, timedelta
+import time
 
 # --- CONFIGURATION ---
 st.set_page_config(page_title="NeuroLearn AI", page_icon="🧠", layout="wide")
 
+# --- SESSION STATE ---
+if "working_model_name" not in st.session_state:
+    st.session_state.working_model_name = None
+
 # --- SIDEBAR ---
 with st.sidebar:
     st.header("🔑 Setup")
-    api_key_input = st.text_input("Google Gemini API Key", type="password")
-    api_key = api_key_input.strip() if api_key_input else None
+    api_key = st.text_input("Google Gemini API Key", type="password").strip()
     
     st.divider()
-    
-    if api_key:
-        # Simple connectivity check
-        try:
-            genai.configure(api_key=api_key)
-            # We strictly use 1.5 Flash
-            model = genai.GenerativeModel('gemini-1.5-flash') 
-            st.success("✅ **Connected to Gemini 1.5 Flash**")
-        except Exception as e:
-            st.error("❌ Key Invalid")
+    status_box = st.empty()
 
-# --- FUNCTIONS ---
+# --- ROBUST FUNCTIONS ---
+
+def find_working_model(api_key):
+    """
+    Tries every possible model name until one works.
+    """
+    genai.configure(api_key=api_key)
+    
+    # List of candidates to try (Newest -> Oldest)
+    candidates = [
+        "gemini-1.5-flash",
+        "gemini-1.5-flash-001",
+        "gemini-1.5-pro",
+        "gemini-1.5-pro-latest",
+        "gemini-pro",
+        "gemini-1.0-pro"
+    ]
+    
+    status_box.info("🔍 Testing AI models...")
+    
+    for model_name in candidates:
+        try:
+            # Try to generate a tiny prompt to test connection
+            model = genai.GenerativeModel(model_name)
+            response = model.generate_content("Test")
+            if response:
+                return model_name
+        except Exception as e:
+            # If 404 (Not found) or 429 (Quota), just try the next one
+            continue
+            
+    return None
 
 def clean_json_text(text):
     text = text.replace("```json", "").replace("```", "")
@@ -56,15 +82,12 @@ def get_youtube_transcript(url):
         
         transcript = YouTubeTranscriptApi.get_transcript(video_id)
         return TextFormatter().format_transcript(transcript), None
-    except Exception as e:
+    except:
         return None, "Video must have captions enabled."
 
-def analyze_content(content_text, api_key):
+def analyze_content(content_text, api_key, model_name):
     genai.configure(api_key=api_key)
-    
-    # HARDCODED FIX: Use the specific stable model name
-    # This prevents the "404 models/..." error
-    model = genai.GenerativeModel('gemini-1.5-flash')
+    model = genai.GenerativeModel(model_name)
     
     prompt = f"""
     Analyze this content for a student. Return strictly VALID JSON:
@@ -77,7 +100,7 @@ def analyze_content(content_text, api_key):
     }}
     
     CONTENT:
-    {content_text[:30000]}
+    {content_text[:25000]}
     """
     
     try:
@@ -101,11 +124,24 @@ def generate_schedule(start_date, difficulty):
         })
     return pd.DataFrame(schedule)
 
-# --- UI ---
+# --- MAIN LOGIC ---
+
+# Check connection immediately
+if api_key:
+    if not st.session_state.working_model_name:
+        found_model = find_working_model(api_key)
+        if found_model:
+            st.session_state.working_model_name = found_model
+            status_box.success(f"✅ Connected: `{found_model}`")
+        else:
+            status_box.error("❌ No working models found. Check Quota/Key.")
+    else:
+        status_box.success(f"✅ Using: `{st.session_state.working_model_name}`")
+
 st.title("🧠 NeuroSchedule AI")
 
-if not api_key:
-    st.warning("⚠️ Enter API Key in sidebar.")
+if not st.session_state.working_model_name:
+    st.warning("waiting for valid API connection...")
     st.stop()
 
 tab1, tab2, tab3 = st.tabs(["📄 PDF Upload", "📺 YouTube Video", "📝 Paste Text"])
@@ -125,8 +161,8 @@ with tab3:
     if t: content = t
 
 if content and st.button("🚀 Analyze"):
-    with st.spinner("Processing with Gemini 1.5 Flash..."):
-        data = analyze_content(content, api_key)
+    with st.spinner("Analyzing..."):
+        data = analyze_content(content, api_key, st.session_state.working_model_name)
         if data:
             st.divider()
             c1, c2 = st.columns(2)
