@@ -14,15 +14,18 @@ st.set_page_config(page_title="NeuroLearn AI", page_icon="🧠", layout="wide")
 # --- SIDEBAR ---
 with st.sidebar:
     st.header("🔑 Setup")
-    api_key = st.text_input("Google Gemini API Key", type="password")
+    # .strip() removes accidental spaces when pasting
+    api_key_input = st.text_input("Google Gemini API Key", type="password")
+    api_key = api_key_input.strip() if api_key_input else None
+    
     st.caption("Get a key: [aistudio.google.com](https://aistudio.google.com/app/apikey)")
     st.divider()
-    st.info("Using **Gemini 1.5 Flash** (High Speed / High Free Quota)")
+    st.write("### 🛠️ Diagnostics")
+    debug_placeholder = st.empty()
 
 # --- FUNCTIONS ---
 
 def clean_json_text(text):
-    # Remove markdown and extract JSON object
     text = text.replace("```json", "").replace("```", "")
     start = text.find('{')
     end = text.rfind('}') + 1
@@ -51,24 +54,49 @@ def get_youtube_transcript(url):
     except Exception as e:
         return None, "Video must have captions enabled."
 
-def analyze_content(content_text, api_key):
+def get_working_model(api_key):
+    """
+    Asks Google specifically which models are allowed for this Key.
+    """
     genai.configure(api_key=api_key)
+    try:
+        # 1. List all models available to this key
+        all_models = list(genai.list_models())
+        
+        # 2. Filter for models that generate content
+        generative_models = [m for m in all_models if 'generateContent' in m.supported_generation_methods]
+        
+        # 3. Sort by preference (Flash is fastest/cheapest, Pro is smartest)
+        # We look for 'flash' first
+        for m in generative_models:
+            if 'flash' in m.name and '1.5' in m.name:
+                return m.name
+        
+        # Fallback: Any Gemini model
+        for m in generative_models:
+            if 'gemini' in m.name:
+                return m.name
+                
+        return None
+    except Exception as e:
+        st.sidebar.error(f"API Connection Error: {e}")
+        return None
+
+def analyze_content(content_text, api_key):
+    # 1. Auto-Discover Model
+    model_name = get_working_model(api_key)
     
-    # STRICT MODEL LIST: We only try models with generous free tiers.
-    # We specifically avoid "experimental" (exp) models which have 0 quota.
-    models_to_try = [
-        'gemini-1.5-flash',       # Best option (Fastest, High Limits)
-        'gemini-1.5-flash-001',   # Alternate ID
-        'gemini-1.5-pro',         # Backup (Slower, but powerful)
-        'gemini-pro'              # Legacy backup
-    ]
+    if not model_name:
+        st.error("❌ Could not find any active AI models for your API Key. Please generate a new key.")
+        return None
     
-    active_model = None
+    # Show user which model we picked
+    debug_placeholder.success(f"✅ Connected to: `{model_name}`")
     
-    # 1. Prompt
+    model = genai.GenerativeModel(model_name)
+    
     prompt = f"""
-    Analyze this content for a student using Cognitive Load Theory.
-    Return strictly VALID JSON with no extra text:
+    Analyze this content for a student. Return strictly VALID JSON:
     {{
         "summary": "2 sentence summary.",
         "difficulty_score": (Integer 1-10),
@@ -77,25 +105,17 @@ def analyze_content(content_text, api_key):
         "learning_advice": "One specific study technique."
     }}
     
-    CONTENT (Truncated):
+    CONTENT:
     {content_text[:25000]}
     """
-
-    # 2. Attempt with Priority List
-    for model_name in models_to_try:
-        try:
-            model = genai.GenerativeModel(model_name)
-            response = model.generate_content(prompt)
-            return json.loads(clean_json_text(response.text))
-        except Exception as e:
-            # If it's a quota error (429), wait 2 seconds and try next model
-            if "429" in str(e):
-                time.sleep(2)
-                continue
-            continue
-            
-    st.error("All AI models are busy or quota exceeded. Please try again in 1 minute.")
-    return None
+    
+    try:
+        response = model.generate_content(prompt)
+        return json.loads(clean_json_text(response.text))
+    except Exception as e:
+        st.error(f"❌ Analysis Failed using {model_name}. Error: {e}")
+        st.info("Tip: If the error says '429' or 'Quota', wait 1 minute and try again.")
+        return None
 
 def generate_schedule(start_date, difficulty):
     intervals = [0, 1, 3, 7, 14, 30]
