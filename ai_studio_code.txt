@@ -1,2 +1,5 @@
 streamlit
+google-generativeai
+youtube_transcript_api
+PyPDF2
 pandas
