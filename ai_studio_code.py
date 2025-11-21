@@ -5,6 +5,7 @@ from youtube_transcript_api.formatters import TextFormatter
 import PyPDF2
 import pandas as pd
 import json
+import time
 from datetime import datetime, timedelta
 
 # --- CONFIGURATION ---
@@ -15,36 +16,13 @@ with st.sidebar:
     st.header("🔑 Setup")
     api_key = st.text_input("Google Gemini API Key", type="password")
     st.caption("Get a key: [aistudio.google.com](https://aistudio.google.com/app/apikey)")
+    st.divider()
+    st.info("Using **Gemini 1.5 Flash** (High Speed / High Free Quota)")
 
-# --- ROBUST AI FUNCTIONS ---
-
-def get_available_model(api_key):
-    """
-    Dynamically finds a working model so the app never crashes.
-    """
-    genai.configure(api_key=api_key)
-    try:
-        # Ask Google what models are available to this API Key
-        available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-        
-        # Priority List: Try to find Flash, then Pro, then any Gemini
-        for model_name in available_models:
-            if "flash" in model_name and "1.5" in model_name:
-                return model_name
-        
-        for model_name in available_models:
-            if "pro" in model_name and "1.5" in model_name:
-                return model_name
-                
-        for model_name in available_models:
-            if "gemini" in model_name:
-                return model_name
-                
-        return "gemini-pro" # Final Fallback
-    except Exception as e:
-        return None
+# --- FUNCTIONS ---
 
 def clean_json_text(text):
+    # Remove markdown and extract JSON object
     text = text.replace("```json", "").replace("```", "")
     start = text.find('{')
     end = text.rfind('}') + 1
@@ -74,17 +52,23 @@ def get_youtube_transcript(url):
         return None, "Video must have captions enabled."
 
 def analyze_content(content_text, api_key):
-    # 1. Find the best model dynamically
-    model_name = get_available_model(api_key)
-    if not model_name:
-        st.error("Could not list models. Check API Key.")
-        return None
-        
-    model = genai.GenerativeModel(model_name)
+    genai.configure(api_key=api_key)
     
-    # 2. Prompt
+    # STRICT MODEL LIST: We only try models with generous free tiers.
+    # We specifically avoid "experimental" (exp) models which have 0 quota.
+    models_to_try = [
+        'gemini-1.5-flash',       # Best option (Fastest, High Limits)
+        'gemini-1.5-flash-001',   # Alternate ID
+        'gemini-1.5-pro',         # Backup (Slower, but powerful)
+        'gemini-pro'              # Legacy backup
+    ]
+    
+    active_model = None
+    
+    # 1. Prompt
     prompt = f"""
-    Analyze this content for a student. Return strictly VALID JSON:
+    Analyze this content for a student using Cognitive Load Theory.
+    Return strictly VALID JSON with no extra text:
     {{
         "summary": "2 sentence summary.",
         "difficulty_score": (Integer 1-10),
@@ -93,16 +77,25 @@ def analyze_content(content_text, api_key):
         "learning_advice": "One specific study technique."
     }}
     
-    CONTENT:
+    CONTENT (Truncated):
     {content_text[:25000]}
     """
-    
-    try:
-        response = model.generate_content(prompt)
-        return json.loads(clean_json_text(response.text))
-    except Exception as e:
-        st.error(f"AI Error using model {model_name}: {e}")
-        return None
+
+    # 2. Attempt with Priority List
+    for model_name in models_to_try:
+        try:
+            model = genai.GenerativeModel(model_name)
+            response = model.generate_content(prompt)
+            return json.loads(clean_json_text(response.text))
+        except Exception as e:
+            # If it's a quota error (429), wait 2 seconds and try next model
+            if "429" in str(e):
+                time.sleep(2)
+                continue
+            continue
+            
+    st.error("All AI models are busy or quota exceeded. Please try again in 1 minute.")
+    return None
 
 def generate_schedule(start_date, difficulty):
     intervals = [0, 1, 3, 7, 14, 30]
@@ -142,7 +135,7 @@ with tab3:
     if t: content = t
 
 if content and st.button("🚀 Analyze"):
-    with st.spinner("Connecting to Google AI..."):
+    with st.spinner("Connecting to AI Brain..."):
         data = analyze_content(content, api_key)
         if data:
             c1, c2 = st.columns(2)
