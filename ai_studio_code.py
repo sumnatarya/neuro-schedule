@@ -5,24 +5,31 @@ from youtube_transcript_api.formatters import TextFormatter
 import PyPDF2
 import pandas as pd
 import json
+import re
 from datetime import datetime, timedelta
 
-# --- PAGE CONFIG ---
+# --- CONFIGURATION ---
 st.set_page_config(page_title="NeuroLearn AI", page_icon="🧠", layout="wide")
 
-# --- SIDEBAR: API KEY ---
+# --- SIDEBAR ---
 with st.sidebar:
-    st.title("⚙️ Settings")
-    api_key = st.text_input("Enter Google Gemini API Key", type="password")
-    st.caption("Get a free key at: [aistudio.google.com](https://aistudio.google.com/app/apikey)")
-    
+    st.header("🔑 Setup")
+    api_key = st.text_input("Google Gemini API Key", type="password")
+    st.caption("[Get a free key here](https://aistudio.google.com/app/apikey)")
     st.divider()
-    st.write("### Supported Formats")
-    st.write("📄 **PDF Documents** (Lecture notes, chapters)")
-    st.write("📺 **YouTube Videos** (Lectures, Tutorials)")
-    st.write("📝 **Raw Text** (Paste content)")
+    st.info("This app uses 'Gemini 1.5 Flash' to analyze entire lectures and generate spaced repetition schedules.")
 
-# --- LOGIC FUNCTIONS ---
+# --- HELPER FUNCTIONS ---
+
+def clean_json_text(text):
+    """Cleans AI response to ensure valid JSON."""
+    text = text.replace("```json", "").replace("```", "")
+    # Find the first '{' and last '}'
+    start = text.find('{')
+    end = text.rfind('}') + 1
+    if start != -1 and end != 0:
+        return text[start:end]
+    return text
 
 def extract_pdf_text(uploaded_file):
     try:
@@ -32,173 +39,159 @@ def extract_pdf_text(uploaded_file):
             text += page.extract_text() + "\n"
         return text
     except Exception as e:
-        st.error(f"Error reading PDF: {e}")
         return None
 
 def get_youtube_transcript(url):
     try:
-        # Extract Video ID
+        video_id = ""
         if "v=" in url:
             video_id = url.split("v=")[1].split("&")[0]
         elif "youtu.be/" in url:
             video_id = url.split("youtu.be/")[1]
-        else:
-            return None, "Invalid YouTube URL"
+        
+        if not video_id:
+            return None, "Invalid YouTube Link"
 
         transcript = YouTubeTranscriptApi.get_transcript(video_id)
         formatter = TextFormatter()
-        text_formatted = formatter.format_transcript(transcript)
-        return text_formatted, None
+        return formatter.format_transcript(transcript), None
     except Exception as e:
-        return None, str(e)
+        return None, "Could not retrieve transcript. (Video must have captions enabled)"
 
-def analyze_with_gemini(content_text, api_key):
+def analyze_content(content_text, api_key):
+    """
+    The Brain: Uses Gemini to analyze cognitive load.
+    Includes fallback logic to prevent crashes.
+    """
     genai.configure(api_key=api_key)
     
-    # Use Flash model for speed and long context
-    model = genai.GenerativeModel('gemini-1.5-flash')
+    # List of models to try (Newest to Oldest)
+    models = ['gemini-1.5-flash', 'gemini-1.5-flash-001', 'gemini-pro']
+    active_model = None
     
-    # The Scientific Prompt
+    # 1. Select a working model
+    for m in models:
+        try:
+            test = genai.GenerativeModel(m)
+            active_model = test
+            break
+        except:
+            continue
+            
+    if not active_model:
+        st.error("Could not connect to Google AI. Please check your API Key.")
+        return None
+
+    # 2. The Neuro-Science Prompt
     prompt = f"""
-    You are an expert Learning Scientist and Neuro-educator. 
-    Analyze the following content provided below.
+    Act as a Neuro-Education Expert. Analyze the following study material.
     
-    Your goal is to create a study plan based on Cognitive Load Theory and the Forgetting Curve.
-    
-    Return ONLY valid JSON with this exact structure (no markdown formatting):
+    Output strictly VALID JSON with this structure:
     {{
-        "summary": "A concise 2-sentence summary of what this content is about.",
-        "difficulty_score": (Integer 1-10, where 10 is PhD level Physics, 1 is a Bedtime Story),
-        "estimated_study_time_minutes": (Integer, calculated time to deeply LEARN this, not just read. Assume 100 wpm processing speed for hard concepts),
-        "key_concepts": ["Concept 1", "Concept 2", "Concept 3", "Concept 4", "Concept 5"],
-        "learning_advice": "Specific advice on how to tackle this specific topic based on its structure."
+        "summary": "Two sentence summary of the content.",
+        "difficulty_score": (Integer 1-10, where 10 is extremely complex academic material),
+        "estimated_study_time_minutes": (Integer, calculate deep learning time based on 75 words per minute for hard text, 150 wpm for easy),
+        "key_concepts": ["List", "Of", "5", "Main", "Concepts"],
+        "learning_advice": "One specific technique (e.g. 'Use Analogies' or 'Draw Diagrams') tailored to this content type."
     }}
 
     CONTENT TO ANALYZE:
-    {content_text[:20000]} 
+    {content_text[:25000]}
     """
-    # Note: Limiting char count to 20k for safety, though Gemini handles more.
     
     try:
-        response = model.generate_content(prompt)
-        clean_text = response.text.replace("```json", "").replace("```", "")
-        return json.loads(clean_text)
+        response = active_model.generate_content(prompt)
+        clean_response = clean_json_text(response.text)
+        return json.loads(clean_response)
     except Exception as e:
-        st.error(f"AI Analysis Failed: {e}")
+        st.error(f"Analysis Error: {e}")
         return None
 
 def generate_schedule(start_date, difficulty):
-    # Spaced Repetition Logic
-    # Intervals expand based on SM-2 algorithm logic
+    # Ebbinghaus Forgetting Curve Intervals
     intervals = [0, 1, 3, 7, 14, 30]
-    
     schedule = []
     
-    methods_easy = ["Review Summary", "Active Recall", "Practice Quiz", "Relate to other topics"]
-    methods_hard = ["Feynman Technique", "Blurting Method", "Interleaved Practice", "Detailed Mind Map"]
-    
-    method_list = methods_hard if difficulty > 6 else methods_easy
-    
-    for i, interval in enumerate(intervals):
-        date = start_date + timedelta(days=interval)
-        
-        # Cycle through methods if we run out
-        method = method_list[i % len(method_list)]
-        
-        if i == 0:
-            focus = "📥 Encoding: Break down and understand."
-        elif i == 1:
-            focus = "🧠 Retrieval: Force memory without notes."
-        else:
-            focus = "🏗️ Application: Use the knowledge."
+    # Neuro-Strategy Selection
+    if difficulty >= 7:
+        methods = ["📝 Blurting Method", "🗣️ Feynman Technique", "🧩 Interleaved Practice", "🧪 Practical Application", "🔍 Error Analysis", "🏆 Master Review"]
+    else:
+        methods = ["🧠 Active Recall", "⚡ Quick Quiz", "🔄 Summary Review", "🔗 Concept Mapping", "🎤 Teach a Friend", "✅ Final Check"]
 
+    for i, days in enumerate(intervals):
+        date = start_date + timedelta(days=days)
         schedule.append({
-            "Review Session": i + 1,
+            "Session": i + 1,
             "Date": date.strftime("%Y-%m-%d"),
-            "Interval": f"+{interval} days",
-            "Method": method,
-            "Focus": focus
+            "Interval": f"+{days} days",
+            "Technique": methods[i],
+            "Focus": "Encoding" if i == 0 else "Retrieval"
         })
-        
+    
     return pd.DataFrame(schedule)
 
-# --- MAIN UI ---
-st.title("🧠 NeuroLearn AI")
-st.markdown("""
-**The AI-Powered Learning Strategist.**  
-Upload your content. The AI analyzes the *semantic density* to calculate exactly how long and when you should study.
-""")
+# --- UI LAYOUT ---
+st.title("🧠 NeuroSchedule AI")
+st.markdown("### The Scientific Learning Calculator")
 
 if not api_key:
-    st.warning("⚠️ Please enter your Google Gemini API Key in the sidebar to activate the AI brain.")
+    st.warning("⚠️ Please enter your Google Gemini API Key in the sidebar to start.")
     st.stop()
 
-# TABS FOR INPUT
-tab1, tab2, tab3 = st.tabs(["📄 PDF Upload", "📺 YouTube Video", "📝 Paste Text"])
+# Tabs
+tab1, tab2, tab3 = st.tabs(["📄 Upload PDF", "📺 YouTube Video", "📝 Paste Text"])
 
-content_text = None
-source_type = None
+content = None
+source_label = ""
 
 with tab1:
-    pdf_file = st.file_uploader("Upload Lecture Notes / Book Chapter", type=["pdf"])
-    if pdf_file:
-        content_text = extract_pdf_text(pdf_file)
-        source_type = "PDF Document"
+    pdf = st.file_uploader("Upload Notes/Book", type="pdf")
+    if pdf:
+        content = extract_pdf_text(pdf)
+        source_label = "PDF Document"
 
 with tab2:
-    yt_url = st.text_input("Paste YouTube URL (Lectures/Tutorials)")
-    if yt_url:
-        with st.spinner("Fetching Transcript..."):
-            content_text, error = get_youtube_transcript(yt_url)
-            if error:
-                st.error(f"Could not get video: {error}. (Video must have captions)")
+    url = st.text_input("YouTube URL")
+    if url:
+        with st.spinner("Downloading transcript..."):
+            text, err = get_youtube_transcript(url)
+            if err:
+                st.error(err)
             else:
-                source_type = "Video Transcript"
+                content = text
+                source_label = "Video Transcript"
 
 with tab3:
-    raw_text = st.text_area("Paste raw text here")
-    if raw_text:
-        content_text = raw_text
-        source_type = "Raw Text"
+    txt = st.text_area("Enter text")
+    if txt:
+        content = txt
+        source_label = "Raw Text"
 
-# --- EXECUTION ---
-if content_text and st.button("🚀 Generate Neuro-Optimized Plan", type="primary"):
-    with st.spinner("🤖 AI is analyzing cognitive load and concepts..."):
+# Action
+if content and st.button("🚀 Analyze & Generate Plan", type="primary"):
+    with st.spinner("🤖 AI is measuring semantic density and cognitive load..."):
+        data = analyze_content(content, api_key)
         
-        # 1. AI Analysis
-        analysis = analyze_with_gemini(content_text, api_key)
-        
-        if analysis:
+        if data:
             st.divider()
-            st.success("Analysis Complete!")
             
-            # 2. Metrics Display
-            col1, col2, col3 = st.columns(3)
-            col1.metric("Difficulty Score", f"{analysis['difficulty_score']}/10")
-            col2.metric("Est. Deep Work Time", f"{analysis['estimated_study_time_minutes']} min")
-            col3.metric("Source", source_type)
+            # Top Metrics
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Difficulty", f"{data['difficulty_score']}/10")
+            c2.metric("Study Time", f"{data['estimated_study_time_minutes']} min")
+            c3.metric("Source", source_label)
             
-            st.subheader("📝 AI Summary")
-            st.info(analysis['summary'])
+            # Insights
+            st.subheader("📌 Summary")
+            st.info(data['summary'])
             
-            st.subheader("💡 Key Concepts to Master")
-            # Display key concepts as "Flashcard" style tags
-            st.markdown(" ".join([f"`{c}`" for c in analysis['key_concepts']]))
+            st.subheader("🔑 Key Concepts")
+            st.write(", ".join([f"**{c}**" for c in data['key_concepts']]))
             
-            st.subheader("👨‍🏫 Learning Advice")
-            st.write(analysis['learning_advice'])
+            st.subheader("💡 Neuro-Advice")
+            st.success(data['learning_advice'])
             
-            # 3. Schedule Generation
-            st.subheader("📅 Spaced Repetition Calendar")
-            schedule_df = generate_schedule(datetime.now(), analysis['difficulty_score'])
-            
-            st.dataframe(
-                schedule_df, 
-                column_config={
-                    "Review Session": st.column_config.NumberColumn(format="%d"),
-                },
-                use_container_width=True,
-                hide_index=True
-            )
-            
-            st.caption("This schedule is based on the Ebbinghaus Forgetting Curve to maximize retention.")
+            # Schedule
+            st.subheader("📅 Spaced Repetition Schedule")
+            df = generate_schedule(datetime.now(), data['difficulty_score'])
+            st.dataframe(df, use_container_width=True, hide_index=True)
